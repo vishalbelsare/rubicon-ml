@@ -1,10 +1,17 @@
-import warnings
+from __future__ import annotations
 
-from rubicon_ml.client import Base, TagMixin
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Union
+
+from rubicon_ml.client import Base, CommentMixin, TagMixin
+from rubicon_ml.client.utils.exception_handling import failsafe
 from rubicon_ml.exceptions import RubiconException
 
+if TYPE_CHECKING:
+    from rubicon_ml.client import Experiment, Project
+    from rubicon_ml.domain import Dataframe as DataframeDomain
 
-class Dataframe(Base, TagMixin):
+
+class Dataframe(Base, TagMixin, CommentMixin):
     """A client dataframe.
 
     A `dataframe` is a two-dimensional, tabular dataset with
@@ -25,34 +32,49 @@ class Dataframe(Base, TagMixin):
         logged to.
     """
 
-    def __init__(self, domain, parent):
+    def __init__(self, domain: DataframeDomain, parent: Union[Experiment, Project]):
         super().__init__(domain, parent._config)
+
+        self._domain: DataframeDomain
 
         self._data = None
         self._parent = parent
 
-    def get_data(self, df_type="pandas"):
+    @failsafe
+    def get_data(self, df_type: Literal["pandas", "dask"] = "pandas"):
         """Loads the data associated with this Dataframe
         into a `pandas` or `dask` dataframe.
 
         Parameters
         ----------
         df_type : str, optional
-            The type of dataframe. Can be either `pandas` or `dask`.
-            Defaults to 'pandas'.
+            The type of dataframe to return. Valid options include
+            ["dask", "pandas"]. Defaults to "pandas".
         """
         project_name, experiment_id = self.parent._get_identifiers()
+        return_err = None
+        for repo in self.repositories:
+            try:
+                self._data = repo.get_dataframe_data(
+                    project_name,
+                    self.id,
+                    experiment_id=experiment_id,
+                    df_type=df_type,
+                )
+            except Exception as err:
+                return_err = err
+            else:
+                return self._data
 
-        self._data = self.repository.get_dataframe_data(
-            project_name,
-            self.id,
-            experiment_id=experiment_id,
-            df_type=df_type,
-        )
+        raise RubiconException(return_err)
 
-        return self._data
-
-    def plot(self, df_type="pandas", plotting_func=None, **kwargs):
+    @failsafe
+    def plot(
+        self,
+        df_type: Literal["pandas", "dask"] = "pandas",
+        plotting_func: Optional[Callable] = None,
+        **kwargs,
+    ):
         """Render the dataframe using `plotly.express`.
 
         Parameters
@@ -110,18 +132,6 @@ class Dataframe(Base, TagMixin):
     def created_at(self):
         """Get the time this dataframe was created."""
         return self._domain.created_at
-
-    @property
-    def data(self):
-        """Get the dataframe's data as it was logged."""
-        warnings.warn(
-            "`data` is deprecated, use `get_data()` instead",
-            DeprecationWarning,
-        )
-        if self._data is None:
-            self.get_data()
-
-        return self._data
 
     @property
     def parent(self):

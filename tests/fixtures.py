@@ -1,59 +1,59 @@
 import os
 import random
-from unittest.mock import MagicMock
+import uuid
 
+import dask.array as da
+import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import pytest
+from dask.distributed import Client
+from sklearn.datasets import make_classification
 
+from rubicon_ml import Rubicon
 from rubicon_ml.repository import MemoryRepository
 
 
-class AsynchronousMock(MagicMock):
-    async def __call__(self, *args, **kwargs):
-        return super().__call__(*args, **kwargs)
+class _AnotherObject:
+    """Another object to log for schema testing."""
+
+    def __init__(self):
+        self.another_parameter = 100
+        self.another_metric = 100
 
 
-@pytest.fixture
-def asyn_repo_w_mock_filesystem():
-    from rubicon_ml.repository.asynchronous import AsynchronousBaseRepository
+class _ObjectToLog:
+    """An object to log for schema testing."""
 
-    asyn_repo = AsynchronousBaseRepository("s3://test-bucket")
-    asyn_repo._persist_bytes = AsynchronousMock()
-    asyn_repo._persist_domain = AsynchronousMock()
-    asyn_repo.filesystem = AsynchronousMock()
+    def __init__(self):
+        """Initialize an object to log."""
 
-    # Necessary because we are using the synchronous `invalidate_cache`
-    # as `fsspec`'s async S3 repo doesn't seem to do it on its own.
-    asyn_repo.filesystem.invalidate_cache = MagicMock()
+        self.object_ = _AnotherObject()
+        self.feature_names_ = ["var_001", "var_002"]
+        self.other_feature_names_ = ["var_003", "var_004"]
+        self.feature_importances_ = [0.75, 0.25]
+        self.feature_name_ = "var_005"
+        self.other_feature_name_ = "var_006"
+        self.feature_importance_ = 1.0
+        self.dataframe = pd.DataFrame([[100, 0], [0, 100]], columns=["x", "y"])
+        self.parameter = 100
+        self.metric = 100
 
-    return asyn_repo
+    def metric_function(self):
+        return self.metric
 
+    def artifact_function(self):
+        return self
 
-@pytest.fixture
-def asyn_s3_repo_w_mock_filesystem():
-    from rubicon_ml.repository.asynchronous import S3Repository
+    def dataframe_function(self):
+        return pd.DataFrame([[100, 0], [0, 100]], columns=["x", "y"])
 
-    asyn_s3_repo = S3Repository("s3://test-bucket")
-    asyn_s3_repo.filesystem = AsynchronousMock()
-
-    return asyn_s3_repo
-
-
-@pytest.fixture
-def asyn_client_w_mock_repo():
-    from rubicon_ml.client.asynchronous import Rubicon
-
-    rubicon = Rubicon(persistence="filesystem", root_dir="s3://test-bucket")
-    rubicon.repository = AsynchronousMock()
-
-    return rubicon
+    def erroring_function(self):
+        raise RuntimeError("raised from `_ObjectToLog.erroring_function`")
 
 
-class MockCompletedProcess:
-    """Use to mock a CompletedProcess result from
-    `subprocess.run()`.
-    """
+class _MockCompletedProcess:
+    """Use to mock a CompletedProcess result from `subprocess.run()`."""
 
     def __init__(self, stdout="", returncode=0):
         self.stdout = stdout
@@ -62,12 +62,12 @@ class MockCompletedProcess:
 
 @pytest.fixture
 def mock_completed_process_empty():
-    return MockCompletedProcess(stdout=b"\n")
+    return _MockCompletedProcess(stdout=b"\n")
 
 
 @pytest.fixture
 def mock_completed_process_git():
-    return MockCompletedProcess(stdout=b"origin github.com (fetch)\n")
+    return _MockCompletedProcess(stdout=b"origin github.com (fetch)\n")
 
 
 @pytest.fixture
@@ -81,7 +81,32 @@ def rubicon_client():
 
     # teardown after yield
     yield rubicon
+
     rubicon.repository.filesystem.rm(rubicon.config.root_dir, recursive=True)
+
+
+@pytest.fixture
+def rubicon_composite_client():
+    """Setup an instance of rubicon configured to log to two memory
+    backends and clean it up afterwards.
+    """
+    from rubicon_ml import Rubicon
+
+    rubicon = Rubicon(
+        composite_config=[
+            {"persistence": "memory", "root_dir": "a"},
+            {"persistence": "memory", "root_dir": "b"},
+        ],
+    )
+
+    # teardown after yield
+    yield rubicon
+
+    for i, repository in enumerate(rubicon.repositories):
+        repository.filesystem.rm(
+            rubicon.configs[i].root_dir,
+            recursive=True,
+        )
 
 
 @pytest.fixture
@@ -94,6 +119,7 @@ def rubicon_local_filesystem_client():
     rubicon = Rubicon(
         persistence="filesystem",
         root_dir=os.path.join(os.path.dirname(os.path.realpath(__file__)), "rubicon"),
+        storage_option_a="test",  # should be ignored when logging local dfs
     )
 
     # teardown after yield
@@ -117,6 +143,21 @@ def project_client(rubicon_client):
     with a default project and clean it up afterwards.
     """
     rubicon = rubicon_client
+
+    project_name = "Test Project"
+    project = rubicon.get_or_create_project(
+        project_name, description="In memory project for testing."
+    )
+
+    return project
+
+
+@pytest.fixture
+def project_composite_client(rubicon_composite_client):
+    """Setup an instance of rubicon configured to log to two memory
+    backends with a default project and clean it up afterwards.
+    """
+    rubicon = rubicon_composite_client
 
     project_name = "Test Project"
     project = rubicon.get_or_create_project(
@@ -166,36 +207,6 @@ def rubicon_and_project_client_with_experiments(rubicon_and_project_client):
 
 
 @pytest.fixture
-def dashboard_setup(rubicon_and_project_client_with_experiments):
-    """Setup an instance of the rubicon dashboard with a default project
-    and experiment data.
-    """
-    from rubicon_ml.ui.dashboard import Dashboard
-
-    rubicon, project = rubicon_and_project_client_with_experiments
-    dashboard = Dashboard(rubicon.config.persistence, rubicon.config.root_dir)
-
-    return dashboard
-
-
-@pytest.fixture
-def dashboard_setup_without_parameters_or_metrics(rubicon_and_project_client):
-    """Setup an instance of the rubicon dashboard with a default project and
-    the bare minimum experiment data.
-    """
-    from rubicon_ml.ui.dashboard import Dashboard
-
-    rubicon, project = rubicon_and_project_client
-
-    for i in range(0, 3):
-        project.log_experiment(f"exp-{i}")
-
-    dashboard = Dashboard(rubicon.config.persistence, rubicon.config.root_dir)
-
-    return dashboard
-
-
-@pytest.fixture
 def test_dataframe():
     """Create a test dataframe which can be logged to a project or experiment."""
     import pandas as pd
@@ -211,7 +222,7 @@ def test_dataframe():
 def memory_repository():
     """Setup an in-memory repository and clean it up afterwards."""
     root_dir = "/in-memory-root"
-    repository = MemoryRepository(root_dir)
+    repository = MemoryRepository(root_dir, storage_option_a="test")
 
     yield repository
     repository.filesystem.rm(root_dir, recursive=True)
@@ -262,14 +273,20 @@ def viz_experiments(rubicon_and_project_client):
         experiment.log_parameter(name="test param 0", value=random.choice([True, False]))
         experiment.log_parameter(name="test param 1", value=random.randrange(2, 10, 2))
         experiment.log_parameter(
-            name="test param 2", value=random.choice(["A", "B", "C", "D", "E"])
+            name="test param 2",
+            value=random.choice(["A", "B", "C", "D", "E"]),
+            tags=["a", "b"],
         )
 
         experiment.log_metric(name="test metric 0", value=random.random())
         experiment.log_metric(name="test metric 1", value=random.random())
 
         experiment.log_metric(name="test metric 2", value=[random.random() for _ in range(0, 5)])
-        experiment.log_metric(name="test metric 3", value=[random.random() for _ in range(0, 5)])
+        experiment.log_metric(
+            name="test metric 3",
+            value=[random.random() for _ in range(0, 5)],
+            tags=["a", "b"],
+        )
 
         data = np.array(
             [
@@ -282,3 +299,267 @@ def viz_experiments(rubicon_and_project_client):
         experiment.log_dataframe(data_df, name="test dataframe")
 
     return project.experiments()
+
+
+@pytest.fixture
+def viz_experiments_no_dataframes(rubicon_and_project_client):
+    """Returns a list of experiments with the parameters, metrics, and dataframes
+    required to test the `viz` module.
+    """
+    _, project = rubicon_and_project_client
+
+    # dates = pd.date_range(start="1/1/2010", end="12/1/2020", freq="MS")
+
+    for i in range(0, 10):
+        experiment = project.log_experiment(
+            commit_hash="1234567",
+            model_name="test model name",
+            name="test name",
+            tags=["test tag"],
+        )
+
+        experiment.log_parameter(name="test param 0", value=random.choice([True, False]))
+        experiment.log_parameter(name="test param 1", value=random.randrange(2, 10, 2))
+        experiment.log_parameter(
+            name="test param 2",
+            value=random.choice(["A", "B", "C", "D", "E"]),
+            tags=["a", "b"],
+        )
+
+        experiment.log_metric(name="test metric 0", value=random.random())
+        experiment.log_metric(name="test metric 1", value=random.random())
+
+        experiment.log_metric(name="test metric 2", value=[random.random() for _ in range(0, 5)])
+        experiment.log_metric(
+            name="test metric 3",
+            value=[random.random() for _ in range(0, 5)],
+            tags=["a", "b"],
+        )
+
+    return project.experiments()
+
+
+@pytest.fixture
+def objects_to_log():
+    """Returns objects for testing."""
+
+    return _ObjectToLog(), _AnotherObject()
+
+
+@pytest.fixture
+def another_object_schema():
+    """Returns a schema representing ``_AnotherObject``."""
+
+    return {
+        "parameters": [{"name": "another_parameter", "value_attr": "another_parameter"}],
+        "metrics": [{"name": "another_metric", "value_attr": "another_metric"}],
+    }
+
+
+@pytest.fixture
+def artifact_schema():
+    """Returns a schema for testing artifacts."""
+
+    return {
+        "artifacts": [
+            "self",
+            {"name": "object_", "data_object_attr": "object_"},
+            {"name": "object_b", "data_object_func": "artifact_function"},
+        ]
+    }
+
+
+@pytest.fixture
+def dataframe_schema():
+    """Returns a schema for testing dataframes."""
+
+    return {
+        "dataframes": [
+            {"name": "dataframe", "df_attr": "dataframe"},
+            {"name": "dataframe_b", "df_func": "dataframe_function"},
+        ]
+    }
+
+
+@pytest.fixture
+def feature_schema():
+    """Returns a schema for testing features."""
+
+    return {
+        "features": [
+            {
+                "names_attr": "feature_names_",
+                "importances_attr": "feature_importances_",
+            },
+            {"names_attr": "other_feature_names_"},
+            {"name_attr": "feature_name_", "importance_attr": "feature_importance_"},
+            {"name_attr": "other_feature_name_"},
+        ]
+    }
+
+
+@pytest.fixture
+def metric_schema():
+    """Returns a schema for testing metrics."""
+
+    return {
+        "metrics": [
+            {"name": "metric_a", "value_attr": "metric"},
+            {"name": "metric_b", "value_env": "METRIC"},
+            {"name": "metric_c", "value_func": "metric_function"},
+        ],
+    }
+
+
+@pytest.fixture
+def parameter_schema():
+    """Returns a schema for testing parameters."""
+
+    return {
+        "parameters": [
+            {"name": "parameter_a", "value_attr": "parameter"},
+            {"name": "parameter_b", "value_env": "PARAMETER"},
+        ],
+    }
+
+
+@pytest.fixture
+def nested_schema():
+    """Returns a schema for testing nested schema."""
+
+    return {"schema": [{"name": "tests___AnotherObject", "attr": "object_"}]}
+
+
+@pytest.fixture
+def optional_schema():
+    """Returns a schema for testing optional attributes."""
+
+    return {
+        "artifacts": [
+            {
+                "name": "object",
+                "data_object_attr": "missing_object",
+                "optional": "true",
+            },
+            {
+                "name": "object_b",
+                "data_object_func": "missing_object_func",
+                "optional": "true",
+            },
+        ],
+        "dataframes": [
+            {"name": "dataframe", "df_attr": "missing_dataframe", "optional": "true"},
+            {
+                "name": "dataframe_b",
+                "df_func": "missing_dataframe_func",
+                "optional": "true",
+            },
+        ],
+        "features": [
+            {"names_attr": "missing_feature_names", "optional": "true"},
+            {"name_attr": "missing_feature_name", "optional": "true"},
+        ],
+        "metrics": [
+            {"name": "metric_a", "value_attr": "missing_metric", "optional": "true"},
+            {"name": "metric_b", "value_env": "MISSING_METRIC", "optional": "true"},
+            {
+                "name": "metric_c",
+                "value_func": "missing_metric_func",
+                "optional": "true",
+            },
+        ],
+        "parameters": [
+            {
+                "name": "parameter_a",
+                "value_attr": "missing_parameter",
+                "optional": "true",
+            },
+            {
+                "name": "parameter_b",
+                "value_env": "MISSING_PARAMETER",
+                "optional": "true",
+            },
+        ],
+        "schema": [
+            {
+                "name": "MissingObject",
+                "attr": "another_missing_object",
+                "optional": "true",
+            }
+        ],
+    }
+
+
+@pytest.fixture
+def hierarchical_schema():
+    """Returns a schema for testing hierarchical schema."""
+
+    return {"children": [{"name": "AnotherObject", "attr": "children"}]}
+
+
+@pytest.fixture
+def rubicon_project():
+    """Returns an in-memory rubicon project for testing."""
+
+    rubicon = Rubicon(persistence="memory", root_dir="/tmp")
+
+    random_name = str(uuid.uuid4())
+    return rubicon.create_project(name=random_name)
+
+
+@pytest.fixture
+def make_classification_array():
+    """Returns classification data generated by scikit-learn as an array."""
+
+    X, y = make_classification(
+        n_samples=1000,
+        n_features=10,
+        n_informative=5,
+        n_redundant=5,
+        n_classes=2,
+        class_sep=1,
+        random_state=3211,
+    )
+
+    return X, y
+
+
+@pytest.fixture
+def make_classification_df(make_classification_array):
+    """Returns classification data generated by scikit-learn as dataframes."""
+
+    X, y = make_classification_array
+    X_df = pd.DataFrame(X, columns=[f"var_{i}" for i in range(10)])
+
+    return X_df, y
+
+
+@pytest.fixture
+def dask_client():
+    """Returns a dask client and shuts it down upon test completion."""
+
+    client = Client()
+
+    yield client
+
+    client.shutdown()
+
+
+@pytest.fixture
+def make_classification_dask_array(make_classification_array):
+    """Returns classification data generated by scikit-learn as a dask array."""
+
+    X, y = make_classification_array
+    X_da, y_da = da.from_array(X), da.from_array(y)
+
+    return X_da, y_da
+
+
+@pytest.fixture
+def make_classification_dask_df(make_classification_df):
+    """Returns classification data generated by scikit-learn as dataframes."""
+
+    X, y = make_classification_df
+    X_df, y_da = dd.from_pandas(X, npartitions=1), da.from_array(y)
+
+    return X_df, y_da

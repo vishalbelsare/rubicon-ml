@@ -1,5 +1,14 @@
+from unittest import mock
+
+import pytest
+
 from rubicon_ml import domain
 from rubicon_ml.client import Experiment
+from rubicon_ml.exceptions import RubiconException
+
+
+def _raise_error():
+    raise RubiconException()
 
 
 def test_properties(project_client):
@@ -14,6 +23,7 @@ def test_properties(project_client):
         commit_hash="a-commit-hash",
         training_metadata=domain.utils.TrainingMetadata([("test/path", "SELECT * FROM test")]),
         tags=["x"],
+        comments=["this is a comment"],
     )
     experiment = Experiment(domain_experiment, project)
 
@@ -26,6 +36,7 @@ def test_properties(project_client):
     assert experiment.commit_hash == domain_experiment.commit_hash
     assert experiment.training_metadata == domain_experiment.training_metadata.training_metadata[0]
     assert experiment.tags == domain_experiment.tags
+    assert experiment.comments == domain_experiment.comments
     assert experiment.created_at == domain_experiment.created_at
     assert experiment.id == domain_experiment.id
     assert experiment.project == project
@@ -65,6 +76,17 @@ def test_get_metrics(project_client):
     assert metrics[0].value == metric["value"]
 
 
+@mock.patch("rubicon_ml.repository.BaseRepository.get_metrics")
+def test_get_metrics_multiple_backend_error(mock_get_metrics, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_metrics.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.metrics()
+    assert "all configured storage backends failed" in str(e)
+
+
 def test_get_metric_by_name(project_client):
     project = project_client
     experiment = project.log_experiment(name="exp1")
@@ -72,6 +94,28 @@ def test_get_metric_by_name(project_client):
 
     metric = experiment.metric(name="accuracy").name
     assert metric == "accuracy"
+
+
+def test_get_metric_fails_neither_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_metric("accuracy", 100)
+
+    with pytest.raises(ValueError) as e:
+        experiment.metric(name=None, id=None)
+
+    assert "`name` OR `id` required." in str(e)
+
+
+def test_get_metric_fails_both_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_metric("accuracy", 100)
+
+    with pytest.raises(ValueError) as e:
+        experiment.metric(name="foo", id=123)
+
+    assert "`name` OR `id` required." in str(e)
 
 
 def test_metrics_tagged_and(project_client):
@@ -113,6 +157,17 @@ def test_get_metric_by_id(project_client):
     assert metric == "accuracy"
 
 
+@mock.patch("rubicon_ml.repository.BaseRepository.get_metric")
+def test_get_metric_multiple_backend_error(mock_get_metric, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_metric.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.metric("accuracy")
+    assert "all configured storage backends failed" in str(e)
+
+
 def test_log_feature(project_client):
     project = project_client
     experiment = project.log_experiment(name="exp1")
@@ -135,6 +190,17 @@ def test_get_features(project_client):
     assert features[1].name == "credit score"
 
 
+@mock.patch("rubicon_ml.repository.BaseRepository.get_features")
+def test_get_features_multiple_backend_error(mock_get_features, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_features.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.features()
+    assert "all configured storage backends failed" in str(e)
+
+
 def test_get_feature_by_name(project_client):
     project = project_client
     experiment = project.log_experiment(name="exp1")
@@ -152,6 +218,39 @@ def test_get_feature_by_id(project_client):
 
     feature = experiment.feature(id=feature_id).name
     assert feature == "year"
+
+
+def test_get_feature_fails_neither_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_feature("year")
+
+    with pytest.raises(ValueError) as e:
+        experiment.feature(name=None, id=None)
+
+    assert "`name` OR `id` required." in str(e)
+
+
+def test_get_feature_fails_both_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_feature("year")
+
+    with pytest.raises(ValueError) as e:
+        experiment.feature(name="foo", id=123)
+
+    assert "`name` OR `id` required." in str(e)
+
+
+@mock.patch("rubicon_ml.repository.BaseRepository.get_feature")
+def test_get_feature_multiple_backend_error(mock_get_feature, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_feature.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.feature("year")
+    assert "all configured storage backends failed" in str(e)
 
 
 def test_features_tagged_and(project_client):
@@ -207,6 +306,17 @@ def test_parameters(project_client):
     assert parameter_b.id in [p.id for p in parameters]
 
 
+@mock.patch("rubicon_ml.repository.BaseRepository.get_parameters")
+def test_parameters_multiple_backend_error(mock_get_parameters, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_parameters.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.parameters()
+    assert "all configured storage backends failed" in str(e)
+
+
 def test_get_parameter_by_name(project_client):
     project = project_client
     experiment = project.log_experiment(name="exp1")
@@ -224,6 +334,39 @@ def test_get_parameter_by_id(project_client):
 
     parameter = experiment.parameter(id=parameter_id).name
     assert parameter == "n_estimators"
+
+
+def test_get_parameter_fails_neither_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_parameter("n_estimators", "estimator")
+
+    with pytest.raises(ValueError) as e:
+        experiment.parameter(name=None, id=None)
+
+    assert "`name` OR `id` required." in str(e)
+
+
+def test_get_parameter_fails_both_set(project_client):
+    project = project_client
+    experiment = project.log_experiment(name="exp1")
+    experiment.log_parameter("n_estimators", "estimator")
+
+    with pytest.raises(ValueError) as e:
+        experiment.parameter(name="foo", id=123)
+
+    assert "`name` OR `id` required." in str(e)
+
+
+@mock.patch("rubicon_ml.repository.BaseRepository.get_parameter")
+def test_get_parameter_multiple_backend_error(mock_get_parameter, project_composite_client):
+    project = project_composite_client
+    experiment = project.log_experiment(name="exp1")
+
+    mock_get_parameter.side_effect = _raise_error
+    with pytest.raises(RubiconException) as e:
+        experiment.parameter("n_estimators")
+    assert "all configured storage backends failed" in str(e)
 
 
 def test_parameters_tagged_and(project_client):
@@ -253,3 +396,55 @@ def test_parameters_tagged_or(project_client):
     assert len(parameters) == 2
     assert param_a.id in [d.id for d in parameters]
     assert param_b.id in [d.id for d in parameters]
+
+
+def test_add_child_experiment(project_client):
+    project = project_client
+    parent = project.log_experiment(name="parent")
+    child = project.log_experiment(name="child")
+
+    parent.add_child_experiment(child)
+
+    assert f"parent:{parent.id}" in child.tags
+    assert f"child:{child.id}" in parent.tags
+
+
+def test_add_child_experiment_error(rubicon_and_project_client):
+    rubicon, project = rubicon_and_project_client
+    another_project = rubicon.create_project(name="another one")
+
+    parent = project.log_experiment(name="parent")
+    child = another_project.log_experiment(name="child")
+
+    with pytest.raises(RubiconException) as error:
+        parent.add_child_experiment(child)
+
+    assert "Descendents must be logged to the same project." in str(error)
+
+
+def test_get_child_experiments(project_client):
+    project = project_client
+    parent = project.log_experiment(name="parent")
+    child = project.log_experiment(name="child")
+
+    parent.add_child_experiment(child)
+
+    assert parent.get_child_experiments()[0].id == child.id
+
+
+def test_get_parent_experiments(project_client):
+    project = project_client
+    parent = project.log_experiment(name="parent")
+    child = project.log_experiment(name="child")
+
+    parent.add_child_experiment(child)
+
+    assert child.get_parent_experiments()[0].id == parent.id
+
+
+def test_get_relative_experiments_none(project_client):
+    project = project_client
+    experiment = project.log_experiment()
+
+    assert experiment.get_child_experiments() == []
+    assert experiment.get_parent_experiments() == []

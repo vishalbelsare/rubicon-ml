@@ -15,18 +15,28 @@ filesystems = [
         Rubicon(persistence="filesystem", root_dir="s3://change-me"),
         marks=pytest.mark.write_files,
     ),
+    pytest.param(
+        Rubicon(
+            composite_config=[
+                {"persistence": "memory", "root_dir": "./memory/root"},
+                {"persistence": "filesystem", "root_dir": "./test-rubicon"},
+            ]
+        ),
+        marks=pytest.mark.write_files,
+    ),
 ]
 
 
 @pytest.mark.parametrize("rubicon", filesystems)
 def test_rubicon(rubicon, request):
-    if "change-me" in rubicon.repository.root_dir:
-        root_dir = request.config.getoption("s3-path")
+    for repository in rubicon.repositories:
+        if "change-me" in repository.root_dir:
+            root_dir = request.config.getoption("s3-path")
 
-        if root_dir is None:
-            pytest.fail("`root_dir` cannot be None. Run `pytest` with `--s3-path`.")
+            if root_dir is None:
+                pytest.fail("`root_dir` cannot be None. Run `pytest` with `--s3-path`.")
 
-        rubicon.repository.root_dir = root_dir
+            repository.root_dir = root_dir
 
     written_project = rubicon.create_project(name=f"Test Project {uuid.uuid4()}")
     written_experiment = written_project.log_experiment(name=f"Test Experiment {uuid.uuid4()}")
@@ -49,6 +59,15 @@ def test_rubicon(rubicon, request):
 
     written_project_dataframe = written_project.log_dataframe(
         df=pd.DataFrame([[0, 1], [1, 0]], columns=["a", "b"])
+    )
+
+    json_dict = {"hello": "world", "numbers": [1, 2, 3]}
+
+    written_project_json = written_project.log_json(
+        name=f"Test JSON {uuid.uuid4()}.json", json_object=json_dict
+    )
+    written_experiment_json = written_experiment.log_json(
+        name=f"Test JSON {uuid.uuid4()}.json", json_object=json_dict
     )
 
     written_project_dataframe.add_tags(["x", "y"])
@@ -79,17 +98,22 @@ def test_rubicon(rubicon, request):
     assert written_metric.value == read_metrics[0].value
 
     read_project_artifacts = read_project.artifacts()
-    assert len(read_project_artifacts) == 1
+    assert len(read_project_artifacts) == 2
     assert written_project_artifact.id == read_project_artifacts[0].id
     assert written_project_artifact.data == read_project_artifacts[0].data
+    assert written_project_json.id == read_project_artifacts[1].id
+    assert written_project_json.data == read_project_artifacts[1].data
 
-    read_project.delete_artifacts([read_project_artifacts[0].id])
+    read_project.delete_artifacts([artifact.id for artifact in read_project_artifacts])
     assert len(read_project.artifacts()) == 0
 
     read_experiment_artifacts = read_experiment.artifacts()
-    assert len(read_experiment_artifacts) == 1
+    assert len(read_experiment_artifacts) == 2
     assert written_experiment_artifact.id == read_experiment_artifacts[0].id
     assert written_experiment_artifact.data == read_experiment_artifacts[0].data
+    assert written_experiment_json.id == read_experiment_artifacts[1].id
+    assert written_experiment_json.data == read_experiment_artifacts[1].data
+    assert json_dict == read_experiment_artifacts[1].get_json()
 
     read_project_dataframes = read_project.dataframes()
     assert len(read_project_dataframes) == 1
@@ -100,4 +124,5 @@ def test_rubicon(rubicon, request):
     read_project.delete_dataframes([read_project_dataframes[0].id])
     assert len(read_project.dataframes()) == 0
 
-    rubicon.repository.filesystem.rm(rubicon.repository.root_dir, recursive=True)
+    for repository in rubicon.repositories:
+        repository.filesystem.rm(repository.root_dir, recursive=True)

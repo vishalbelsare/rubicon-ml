@@ -1,16 +1,27 @@
+from __future__ import annotations
+
 import subprocess
 import warnings
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
-import dask.dataframe as dd
 import pandas as pd
 
 from rubicon_ml import domain
 from rubicon_ml.client import ArtifactMixin, Base, DataframeMixin, Experiment
+from rubicon_ml.client.utils.exception_handling import failsafe
 from rubicon_ml.client.utils.tags import filter_children
 from rubicon_ml.exceptions import RubiconException
+from rubicon_ml.schema.logger import SchemaMixin
+
+if TYPE_CHECKING:
+    import dask.dataframe as dd
+
+    from rubicon_ml import Rubicon
+    from rubicon_ml.client import Config, Dataframe
+    from rubicon_ml.domain import Project as ProjectDomain
 
 
-class Project(Base, ArtifactMixin, DataframeMixin):
+class Project(Base, ArtifactMixin, DataframeMixin, SchemaMixin):
     """A client project.
 
     A `project` is a collection of `experiments`,
@@ -24,14 +35,16 @@ class Project(Base, ArtifactMixin, DataframeMixin):
         The config, which specifies the underlying repository.
     """
 
-    def __init__(self, domain, config=None):
+    def __init__(self, domain: ProjectDomain, config: Optional[Union[Config, List[Config]]] = None):
         super().__init__(domain, config)
+
+        self._domain: ProjectDomain
 
         self._artifacts = []
         self._dataframes = []
         self._experiments = []
 
-    def _get_branch_name(self):
+    def _get_branch_name(self) -> str:
         """Returns the name of the active branch of the `git` repo
         it is called from.
         """
@@ -40,7 +53,7 @@ class Project(Base, ArtifactMixin, DataframeMixin):
 
         return completed_process.stdout.decode("utf8").replace("\n", "")
 
-    def _get_commit_hash(self):
+    def _get_commit_hash(self) -> str:
         """Returns the hash of the last commit to the active branch
         of the `git` repo it is called from.
         """
@@ -49,7 +62,7 @@ class Project(Base, ArtifactMixin, DataframeMixin):
 
         return completed_process.stdout.decode("utf8").replace("\n", "")
 
-    def _get_identifiers(self):
+    def _get_identifiers(self) -> Tuple[Optional[str], None]:
         """Get the project's name."""
         return self.name, None
 
@@ -62,9 +75,10 @@ class Project(Base, ArtifactMixin, DataframeMixin):
         commit_hash,
         training_metadata,
         tags,
+        comments,
     ):
         """Instantiates and returns an experiment domain object."""
-        if self._config.is_auto_git_enabled:
+        if self.is_auto_git_enabled():
             if branch_name is None:
                 branch_name = self._get_branch_name()
             if commit_hash is None:
@@ -82,9 +96,10 @@ class Project(Base, ArtifactMixin, DataframeMixin):
             commit_hash=commit_hash,
             training_metadata=training_metadata,
             tags=tags,
+            comments=comments,
         )
 
-    def _group_experiments(self, experiments, group_by=None):
+    def _group_experiments(self, experiments: List[Experiment], group_by: Optional[str] = None):
         """Groups experiments by `group_by`. Valid options include ["commit_hash"].
 
         Returns
@@ -109,21 +124,38 @@ class Project(Base, ArtifactMixin, DataframeMixin):
 
         return grouped_experiments
 
-    def to_dask_df(self, group_by=None):
-        """Loads the project's data into dask dataframe(s) sorted by `created_at`.
-        This includes the experiment details along with parameters and metrics.
+    def to_dask_df(self, group_by: Optional[str] = None):
+        """DEPRECATED: Available for backwards compatibility."""
+        warnings.warn(
+            "`to_dask_df` is deprecated and will be removed in a future release. "
+            "use `to_df(df_type='dask') instead.",
+            DeprecationWarning,
+        )
+
+        return self.to_df(df_type="dask", group_by=group_by)
+
+    @failsafe
+    def to_df(
+        self, df_type: str = "pandas", group_by: Optional[str] = None
+    ) -> Union[pd.DataFrame, Dict[str, pd.DataFrame], dd.DataFrame, Dict[str, dd.DataFrame]]:
+        """Loads the project's data into dask or pandas dataframe(s) sorted by
+        `created_at`. This includes the experiment details along with parameters
+        and metrics.
 
         Parameters
         ----------
+        df_type : str, optional
+            The type of dataframe to return. Valid options include
+            ["dask", "pandas"]. Defaults to "pandas".
         group_by : str or None, optional
             How to group the project's experiments in the returned
             dataframe(s). Valid options include ["commit_hash"].
 
         Returns
         -------
-        dask.DataFrame or list of dask.DataFrame
-            If `group_by` is `None`, a dask dataframe holding the project's
-            data. Otherwise a list of dask dataframes holding the project's
+        pandas.DataFrame or dict of pandas.DataFrame or dask.DataFrame or dict of dask.DataFrame
+            If `group_by` is `None`, a dask or pandas dataframe holding the project's
+            data. Otherwise a dict of dask or pandas dataframes holding the project's
             data grouped by `group_by`.
         """
         DEFAULT_COLUMNS = [
@@ -170,22 +202,36 @@ class Project(Base, ArtifactMixin, DataframeMixin):
 
             columns = DEFAULT_COLUMNS + list(parameter_names) + list(metric_names)
             df = pd.DataFrame.from_records(experiment_records, columns=columns)
-
             df = df.sort_values(by=["created_at"], ascending=False).reset_index(drop=True)
-            experiment_dfs[group] = dd.from_pandas(df, npartitions=1)
+
+            if df_type == "dask":
+                try:
+                    from dask import dataframe as dd
+                except ImportError:
+                    raise RubiconException(
+                        "`rubicon_ml` requires `dask` to be installed in the current "
+                        "environment to create dataframes with `df_type`='dask'. `pip install "
+                        "dask[dataframe]` or `conda install dask` to continue."
+                    )
+
+                df = dd.from_pandas(df, npartitions=1)
+
+            experiment_dfs[group] = df
 
         return experiment_dfs if group_by is not None else list(experiment_dfs.values())[0]
 
+    @failsafe
     def log_experiment(
         self,
-        name=None,
-        description=None,
-        model_name=None,
-        branch_name=None,
-        commit_hash=None,
-        training_metadata=None,
-        tags=[],
-    ):
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        model_name: Optional[str] = None,
+        branch_name: Optional[str] = None,
+        commit_hash: Optional[str] = None,
+        training_metadata: Optional[Union[Tuple, List[Tuple]]] = None,
+        tags: Optional[List[str]] = None,
+        comments: Optional[List[str]] = None,
+    ) -> Experiment:
         """Log a new experiment to this project.
 
         Parameters
@@ -215,12 +261,28 @@ class Project(Base, ArtifactMixin, DataframeMixin):
             to differentiate between the type of model or classifier
             used during the experiment (i.e. `linear regression`
             or `random forest`).
+        comments : list of str, optional
+            Values to comment the experiment with.
 
         Returns
         -------
         rubicon.client.Experiment
             The created experiment.
         """
+        if tags is None:
+            tags = []
+
+        if not isinstance(tags, list) or not all([isinstance(tag, str) for tag in tags]):
+            raise ValueError("`tags` must be `list` of type `str`")
+
+        if comments is None:
+            comments = []
+
+        if not isinstance(comments, list) or not all(
+            [isinstance(comment, str) for comment in comments]
+        ):
+            raise ValueError("`comments` must be `list` of type `str`")
+
         experiment = self._create_experiment_domain(
             name,
             description,
@@ -229,12 +291,15 @@ class Project(Base, ArtifactMixin, DataframeMixin):
             commit_hash,
             training_metadata,
             tags,
+            comments,
         )
-        self.repository.create_experiment(experiment)
+        for repo in self.repositories:
+            repo.create_experiment(experiment)
 
         return Experiment(experiment, self)
 
-    def experiment(self, id=None, name=None):
+    @failsafe
+    def experiment(self, id: Optional[str] = None, name: Optional[str] = None) -> Experiment:
         """Get an experiment logged to this project by id or name.
 
         Parameters
@@ -263,13 +328,24 @@ class Project(Base, ArtifactMixin, DataframeMixin):
                     " Returning most recently logged."
                 )
 
-            experiment = experiments[-1]
+            return experiments[-1]
         else:
-            experiment = Experiment(self.repository.get_experiment(self.name, id), self)
+            return_err = None
 
-        return experiment
+            for repo in self.repositories:
+                try:
+                    experiment = Experiment(repo.get_experiment(self.name, id), self)
+                except Exception as err:
+                    return_err = err
+                else:
+                    return experiment
 
-    def experiments(self, tags=[], qtype="or", name=None):
+            self._raise_rubicon_exception(return_err)
+
+    @failsafe
+    def experiments(
+        self, tags: Optional[List[str]] = None, qtype: str = "or", name: Optional[str] = None
+    ) -> List[Experiment]:
         """Get the experiments logged to this project.
 
         Parameters
@@ -287,12 +363,31 @@ class Project(Base, ArtifactMixin, DataframeMixin):
         list of rubicon.client.Experiment
             The experiments previously logged to this project.
         """
-        experiments = [Experiment(e, self) for e in self.repository.get_experiments(self.name)]
-        self._experiments = filter_children(experiments, tags, qtype, name)
+        if tags is None:
+            tags = []
 
-        return self._experiments
+        return_err = None
 
-    def dataframes(self, tags=[], qtype="or", recursive=False, name=None):
+        for repo in self.repositories:
+            try:
+                experiments = [Experiment(e, self) for e in repo.get_experiments(self.name)]
+            except Exception as err:
+                return_err = err
+            else:
+                self._experiments = filter_children(experiments, tags, qtype, name)
+
+                return self._experiments
+
+        self._raise_rubicon_exception(return_err)
+
+    @failsafe
+    def dataframes(
+        self,
+        tags: Optional[List[str]] = None,
+        qtype: str = "or",
+        recursive: bool = False,
+        name: Optional[str] = None,
+    ) -> List[Dataframe]:
         """Get the dataframes logged to this project.
 
         Parameters
@@ -313,6 +408,8 @@ class Project(Base, ArtifactMixin, DataframeMixin):
         list of rubicon.client.Dataframe
             The dataframes previously logged to this client object.
         """
+        if tags is None:
+            tags = []
         super().dataframes(tags=tags, qtype=qtype, name=name)
 
         if recursive is True:
@@ -320,6 +417,66 @@ class Project(Base, ArtifactMixin, DataframeMixin):
                 self._dataframes.extend(experiment.dataframes(tags=tags, qtype=qtype, name=name))
 
         return self._dataframes
+
+    @failsafe
+    def archive(
+        self,
+        experiments: Optional[List[Experiment]] = None,
+        remote_rubicon: Optional[Rubicon] = None,
+    ):
+        """Archive the experiments logged to this project.
+
+        Parameters
+        ----------
+        experiments : list of Experiments, optional
+            The rubicon.client.Experiment objects to archive. If None all logged experiments are archived.
+        remote_rubicon : rubicon_ml.Rubicon object, optional
+            The remote Rubicon object with the repository to archive to
+
+        Returns
+        -------
+        filepath of newly created archive
+        """
+        if len(self.experiments()) == 0:
+            raise ValueError("`project` has no logged `experiments` to archive")
+        if experiments is not None:
+            if not isinstance(experiments, list) or not all(
+                [isinstance(experiment, Experiment) for experiment in experiments]
+            ):
+                raise ValueError(
+                    "`experiments` must be `list` of type `rubicon_ml.client.Experiment`"
+                )
+
+        if remote_rubicon is not None:
+            from rubicon_ml import Rubicon
+
+            if not isinstance(remote_rubicon, Rubicon):
+                raise ValueError("`remote_rubicon` must be of type `rubicon_ml.client.Rubicon`")
+            else:
+                return self.repository._archive(
+                    self.name, experiments, remote_rubicon.repository.root_dir
+                )
+        else:
+            return self.repository._archive(self.name, experiments, None)
+
+    @failsafe
+    def experiments_from_archive(self, remote_rubicon, latest_only: Optional[bool] = False):
+        """Retrieve archived experiments into this project's experiments folder.
+
+        Parameters
+        ----------
+        remote_rubicon : rubicon_ml.Rubicon object
+            The remote Rubicon object with the repository containing archived experiments to read in
+        latest_only : bool, optional
+            Indicates whether or not experiments should only be read from the latest archive
+        """
+        from rubicon_ml import Rubicon
+
+        if not isinstance(remote_rubicon, Rubicon):
+            raise ValueError("`remote_rubicon` must be of type `rubicon_ml.client.Rubicon`")
+        self.repository._experiments_from_archive(
+            self.name, remote_rubicon.repository.root_dir, latest_only
+        )
 
     @property
     def name(self):

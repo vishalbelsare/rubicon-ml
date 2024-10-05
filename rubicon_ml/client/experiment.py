@@ -1,17 +1,28 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List
+
 from rubicon_ml import domain
 from rubicon_ml.client import (
     ArtifactMixin,
     Base,
+    CommentMixin,
     DataframeMixin,
     Feature,
     Metric,
     Parameter,
     TagMixin,
 )
+from rubicon_ml.client.utils.exception_handling import failsafe
 from rubicon_ml.client.utils.tags import filter_children
+from rubicon_ml.exceptions import RubiconException
+
+if TYPE_CHECKING:
+    from rubicon_ml.client import Project
+    from rubicon_ml.domain import Experiment as ExperimentDomain
 
 
-class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
+class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin, CommentMixin):
     """A client experiment.
 
     An `experiment` represents a model run and is identified by
@@ -28,8 +39,10 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         The project that the experiment is logged to.
     """
 
-    def __init__(self, domain, parent):
+    def __init__(self, domain: ExperimentDomain, parent: Project):
         super().__init__(domain, parent._config)
+
+        self._domain: ExperimentDomain
 
         self._parent = parent
         self._artifacts = []
@@ -42,7 +55,16 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         """Get the experiment's project's name and the experiment's ID."""
         return self.project.name, self.id
 
-    def log_metric(self, name, value, directionality="score", description=None, tags=[]):
+    @failsafe
+    def log_metric(
+        self,
+        name: str,
+        value: float,
+        directionality: str = "score",
+        description: str = None,
+        tags: list[str] = [],
+        comments: list[str] = [],
+    ) -> Metric:
         """Create a metric under the experiment.
 
         Parameters
@@ -62,19 +84,37 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         tags : list of str, optional
             Values to tag the experiment with. Use tags to organize and
             filter your metrics.
+        comments : list of str, optional
+            Values to comment the experiment with. Use comments to organize and
+            filter your metrics.
 
         Returns
         -------
         rubicon.client.Metric
             The created metric.
         """
+        if not isinstance(tags, list) or not all([isinstance(tag, str) for tag in tags]):
+            raise ValueError("`tags` must be `list` of type `str`")
+
+        if not isinstance(comments, list) or not all(
+            [isinstance(comment, str) for comment in comments]
+        ):
+            raise ValueError("`comments` must be `list` of type `str`")
+
         metric = domain.Metric(
-            name, value, directionality=directionality, description=description, tags=tags
+            name,
+            value,
+            directionality=directionality,
+            description=description,
+            tags=tags,
+            comments=comments,
         )
-        self.repository.create_metric(metric, self.project.name, self.id)
+        for repo in self.repositories:
+            repo.create_metric(metric, self.project.name, self.id)
 
         return Metric(metric, self)
 
+    @failsafe
     def metrics(self, name=None, tags=[], qtype="or"):
         """Get the metrics logged to this experiment.
 
@@ -93,11 +133,21 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         list of rubicon.client.Metric
             The metrics previously logged to this experiment.
         """
-        metrics = [Metric(m, self) for m in self.repository.get_metrics(self.project.name, self.id)]
-        self._metrics = filter_children(metrics, tags, qtype, name)
+        return_err = None
 
-        return self._metrics
+        for repo in self.repositories:
+            try:
+                metrics = [Metric(m, self) for m in repo.get_metrics(self.project.name, self.id)]
+            except Exception as err:
+                return_err = err
+            else:
+                self._metrics = filter_children(metrics, tags, qtype, name)
 
+                return self._metrics
+
+        self._raise_rubicon_exception(return_err)
+
+    @failsafe
     def metric(self, name=None, id=None):
         """Get a metric.
 
@@ -117,14 +167,29 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
             raise ValueError("`name` OR `id` required.")
 
         if name is not None:
-            metric = self.repository.get_metric(self.project.name, self.id, name)
-            metric = Metric(metric, self)
+            return_err = None
+
+            for repo in self.repositories:
+                try:
+                    metric = repo.get_metric(self.project.name, self.id, name)
+                except Exception as err:
+                    return_err = err
+                else:
+                    return Metric(metric, self)
+
+            self._raise_rubicon_exception(return_err)
         else:
-            metric = [m for m in self.metrics() if m.id == id][0]
+            return [m for m in self.metrics() if m.id == id][0]
 
-        return metric
-
-    def log_feature(self, name, description=None, importance=None, tags=[]):
+    @failsafe
+    def log_feature(
+        self,
+        name: str,
+        description: str = None,
+        importance: float = None,
+        tags: list[str] = [],
+        comments: list[str] = [],
+    ) -> Feature:
         """Create a feature under the experiment.
 
         Parameters
@@ -139,17 +204,33 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         tags : list of str, optional
             Values to tag the experiment with. Use tags to organize and
             filter your features.
+        comments : list of str, optional
+            Values to comment the experiment with. Use comments to organize and
+            filter your features.
 
         Returns
         -------
         rubicon.client.Feature
             The created feature.
         """
-        feature = domain.Feature(name, description=description, importance=importance, tags=tags)
-        self.repository.create_feature(feature, self.project.name, self.id)
+        if not isinstance(tags, list) or not all([isinstance(tag, str) for tag in tags]):
+            raise ValueError("`tags` must be `list` of type `str`")
+
+        if not isinstance(comments, list) or not all(
+            [isinstance(comment, str) for comment in comments]
+        ):
+            raise ValueError("`comments` must be `list` of type `str`")
+
+        feature = domain.Feature(
+            name, description=description, importance=importance, tags=tags, comments=comments
+        )
+
+        for repo in self.repositories:
+            repo.create_feature(feature, self.project.name, self.id)
 
         return Feature(feature, self)
 
+    @failsafe
     def features(self, name=None, tags=[], qtype="or"):
         """Get the features logged to this experiment.
 
@@ -168,14 +249,21 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         list of rubicon.client.Feature
             The features previously logged to this experiment.
         """
+        return_err = None
 
-        features = [
-            Feature(f, self) for f in self.repository.get_features(self.project.name, self.id)
-        ]
+        for repo in self.repositories:
+            try:
+                features = [Feature(f, self) for f in repo.get_features(self.project.name, self.id)]
+            except Exception as err:
+                return_err = err
+            else:
+                self._features = filter_children(features, tags, qtype, name)
 
-        self._features = filter_children(features, tags, qtype, name)
-        return self._features
+                return self._features
 
+        self._raise_rubicon_exception(return_err)
+
+    @failsafe
     def feature(self, name=None, id=None):
         """Get a feature.
 
@@ -195,14 +283,29 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
             raise ValueError("`name` OR `id` required.")
 
         if name is not None:
-            feature = self.repository.get_feature(self.project.name, self.id, name)
-            feature = Feature(feature, self)
+            return_err = None
+
+            for repo in self.repositories:
+                try:
+                    feature = repo.get_feature(self.project.name, self.id, name)
+                except Exception as err:
+                    return_err = err
+                else:
+                    return Feature(feature, self)
+
+            self._raise_rubicon_exception(return_err)
         else:
-            feature = [f for f in self.features() if f.id == id][0]
+            return [f for f in self.features() if f.id == id][0]
 
-        return feature
-
-    def log_parameter(self, name, value=None, description=None, tags=[]):
+    @failsafe
+    def log_parameter(
+        self,
+        name: str,
+        value: object = None,
+        description: str = None,
+        tags: list[str] = [],
+        comments: list[str] = [],
+    ) -> Parameter:
         """Create a parameter under the experiment.
 
         Parameters
@@ -219,17 +322,33 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         tags : list of str, optional
             Values to tag the parameter with. Use tags to organize and
             filter your parameters.
+        comments : list of str, optional
+            Values to comment the experiment with. Use comments to organize and
+            filter your features.
 
         Returns
         -------
         rubicon.client.Parameter
             The created parameter.
         """
-        parameter = domain.Parameter(name, value=value, description=description, tags=tags)
-        self.repository.create_parameter(parameter, self.project.name, self.id)
+        if not isinstance(tags, list) or not all([isinstance(tag, str) for tag in tags]):
+            raise ValueError("`tags` must be `list` of type `str`")
+
+        if not isinstance(comments, list) or not all(
+            [isinstance(comment, str) for comment in comments]
+        ):
+            raise ValueError("`comments` must be `list` of type `str`")
+
+        parameter = domain.Parameter(
+            name, value=value, description=description, tags=tags, comments=comments
+        )
+
+        for repo in self.repositories:
+            repo.create_parameter(parameter, self.project.name, self.id)
 
         return Parameter(parameter, self)
 
+    @failsafe
     def parameters(self, name=None, tags=[], qtype="or"):
         """Get the parameters logged to this experiment.
 
@@ -248,15 +367,23 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
         list of rubicon.client.Parameter
             The parameters previously logged to this experiment.
         """
+        return_err = None
 
-        parameters = [
-            Parameter(p, self) for p in self.repository.get_parameters(self.project.name, self.id)
-        ]
+        for repo in self.repositories:
+            try:
+                parameters = [
+                    Parameter(p, self) for p in repo.get_parameters(self.project.name, self.id)
+                ]
+            except Exception as err:
+                return_err = err
+            else:
+                self._parameters = filter_children(parameters, tags, qtype, name)
 
-        self._parameters = filter_children(parameters, tags, qtype, name)
+                return self._parameters
 
-        return self._parameters
+        self._raise_rubicon_exception(return_err)
 
+    @failsafe
     def parameter(self, name=None, id=None):
         """Get a parameter.
 
@@ -276,12 +403,83 @@ class Experiment(Base, ArtifactMixin, DataframeMixin, TagMixin):
             raise ValueError("`name` OR `id` required.")
 
         if name is not None:
-            parameter = self.repository.get_parameter(self.project.name, self.id, name)
-            parameter = Parameter(parameter, self)
-        else:
-            parameter = [p for p in self.parameters() if p.id == id][0]
+            return_err = None
 
-        return parameter
+            for repo in self.repositories:
+                try:
+                    parameter = repo.get_parameter(self.project.name, self.id, name)
+                except Exception as err:
+                    return_err = err
+                else:
+                    return Parameter(parameter, self)
+
+            self._raise_rubicon_exception(return_err)
+        else:
+            return [p for p in self.parameters() if p.id == id][0]
+
+    def add_child_experiment(self, experiment: Experiment):
+        """Add tags to denote `experiment` as a descendent of this experiment.
+
+        Parameters
+        ----------
+        experiment : rubicon_ml.client.Experiment
+            The experiment to mark as a descendent of this experiment.
+
+        Raises
+        ------
+        RubiconException
+            If `experiment` and this experiment are not logged to the same project.
+        """
+        if experiment.project.id != self.project.id:
+            raise RubiconException(
+                "Descendents must be logged to the same project. Project"
+                f"{experiment.project.id} does not match project {self.project.id}."
+            )
+
+        child_tag = f"child:{experiment.id}"
+        parent_tag = f"parent:{self.id}"
+
+        self.add_tags([child_tag])
+        experiment.add_tags([parent_tag])
+
+    def _get_experiments_from_tags(self, tag_key: str):
+        """Get the experiments with `experiment_id`s in this experiment's tags
+        that match the format `tag_key:experiment_id`.
+
+        Returns
+        -------
+        list of rubicon_ml.client.Experiment
+            The experiments with `experiment_id`s in this experiment's tags.
+        """
+        try:
+            experiment_ids = self.tags[tag_key]
+        except KeyError:
+            return []
+
+        if not isinstance(experiment_ids, list):
+            experiment_ids = [experiment_ids]
+
+        return [self.project.experiment(id=exp_id) for exp_id in experiment_ids]
+
+    def get_child_experiments(self) -> List[Experiment]:
+        """Get the experiments that are tagged as children of this experiment.
+
+        Returns
+        -------
+        list of rubicon_ml.client.Experiment
+            The experiments that are tagged as children of this experiment.
+        """
+        return self._get_experiments_from_tags("child")
+
+    def get_parent_experiments(self) -> List[Experiment]:
+        """Get the experiments that are tagged as parents of this experiment.
+
+        Returns
+        -------
+        list of rubicon_ml.client.Experiment
+            The experiments that are tagged as parents of this experiment.
+        """
+        return self._get_experiments_from_tags("parent")
 
     @property
     def id(self):

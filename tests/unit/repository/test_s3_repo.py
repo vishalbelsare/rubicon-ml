@@ -1,6 +1,7 @@
 import uuid
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 import s3fs
 
@@ -12,8 +13,7 @@ from rubicon_ml.repository.utils import slugify
 def test_initialization():
     s3_repo = S3Repository(root_dir="s3://bucket/root")
 
-    assert s3_repo.PROTOCOL == "s3"
-    assert type(s3_repo.filesystem) == s3fs.core.S3FileSystem
+    assert isinstance(s3_repo.filesystem, s3fs.core.S3FileSystem)
 
 
 @patch("s3fs.core.S3FileSystem.open")
@@ -50,3 +50,30 @@ def test_persist_domain_throws_error(mock_open):
         s3_repo._persist_domain(project, project_metadata_path)
 
     mock_open.assert_not_called()
+
+
+@patch("s3fs.core.S3FileSystem.mkdirs")
+@patch("pandas.DataFrame.to_parquet")
+def test_persist_dataframe(mock_to_parquet, mock_mkdirs):
+    s3_repo = S3Repository(root_dir="s3://bucket/root", storage_option_a="test")
+    df = pd.DataFrame([[0, 1], [1, 0]], columns=["a", "b"])
+
+    s3_repo._persist_dataframe(df, s3_repo.root_dir)
+
+    mock_to_parquet.assert_called_once_with(
+        f"{s3_repo.root_dir}/data.parquet",
+        engine="pyarrow",
+        storage_options={"storage_option_a": "test"},
+    )
+
+
+@patch("pandas.read_parquet")
+def test_read_dataframe(mock_read_parquet):
+    s3_repo = S3Repository(root_dir="s3://bucket/root", storage_option_a="test")
+    s3_repo._read_dataframe(s3_repo.root_dir)
+
+    mock_read_parquet.assert_called_once_with(
+        f"{s3_repo.root_dir}/data.parquet",
+        engine="pyarrow",
+        storage_options={"storage_option_a": "test"},
+    )

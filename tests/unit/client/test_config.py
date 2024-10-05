@@ -22,21 +22,21 @@ def test_enviroment():
         assert config.root_dir == "./rubicon-file-system"
 
 
-def test_get_local_repository():
+def test_init_local_repository():
     config = Config("filesystem", "/local/rubicon-file-system")
 
     assert isinstance(config.repository, LocalRepository)
     assert config.root_dir == config.repository.root_dir
 
 
-def test_get_s3_repository():
+def test_init_s3_repository():
     config = Config("filesystem", "s3://rubicon-file-system")
 
     assert isinstance(config.repository, S3Repository)
     assert config.root_dir == config.repository.root_dir
 
 
-def test_get_memory_repository():
+def test_init_memory_repository():
     config = Config("memory", "/memory/rubicon-file-system")
 
     assert isinstance(config.repository, MemoryRepository)

@@ -1,7 +1,9 @@
+import sys
 import uuid
 from unittest.mock import patch
 
 import pandas as pd
+import polars as pl
 import pytest
 from dask import dataframe as dd
 
@@ -20,12 +22,15 @@ def _create_project(repository):
     return project
 
 
-def _create_experiment(repository, project=None, tags=[]):
+def _create_experiment(repository, project=None, tags=[], comments=[]):
     if project is None:
         project = _create_project(repository)
 
     experiment = domain.Experiment(
-        name=f"Test Experiment {uuid.uuid4()}", project_name=project.name, tags=[]
+        name=f"Test Experiment {uuid.uuid4()}",
+        project_name=project.name,
+        tags=[],
+        comments=[],
     )
     repository.create_experiment(experiment)
 
@@ -51,7 +56,8 @@ def _create_pandas_dataframe(repository, project=None, dataframe_data=None, mult
 
     if dataframe_data is None:
         dataframe_data = pd.DataFrame(
-            [[0, 1, "a"], [1, 1, "b"], [2, 2, "c"], [3, 2, "d"]], columns=["a", "b", "c"]
+            [[0, 1, "a"], [1, 1, "b"], [2, 2, "c"], [3, 2, "d"]],
+            columns=["a", "b", "c"],
         )
         if multi_index:
             dataframe_data = dataframe_data.set_index(["b", "a"])  # Set multiindex
@@ -71,6 +77,24 @@ def _create_dask_dataframe(repository, project=None):
 
     dataframe = domain.Dataframe(parent_id=project.id)
     repository.create_dataframe(dataframe, ddf, project.name)
+
+    return dataframe
+
+
+def _create_polars_dataframe(repository, project=None):
+    if project is None:
+        project = _create_project(repository)
+
+    df = pl.DataFrame(
+        {
+            "a": [0, 1, 2, 3],
+            "b": [1, 1, 2, 2],
+            "c": ["a", "b", "c", "d"],
+        }
+    )
+
+    dataframe = domain.Dataframe(parent_id=project.id)
+    repository.create_dataframe(dataframe, df, project.name)
 
     return dataframe
 
@@ -379,7 +403,23 @@ def test_persist_dataframe(mock_to_parquet, memory_repository):
     # calls `BaseRepository._persist_dataframe` despite class using `MemoryRepository`
     super(MemoryRepository, repository)._persist_dataframe(df, path)
 
-    mock_to_parquet.assert_called_once_with(f"{path}/data.parquet", engine="pyarrow")
+    mock_to_parquet.assert_called_once_with(
+        f"{path}/data.parquet",
+        engine="pyarrow",
+        storage_options={},
+    )
+
+
+@patch("polars.DataFrame.write_parquet")
+def test_persist_dataframe_polars(mock_write_parquet, memory_repository):
+    repository = memory_repository
+    df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
+    path = "./local/root"
+
+    # calls `BaseRepository._persist_dataframe` despite class using `MemoryRepository`
+    super(MemoryRepository, repository)._persist_dataframe(df, path)
+
+    mock_write_parquet.assert_called_once_with(f"{path}")
 
 
 @patch("pandas.read_parquet")
@@ -390,7 +430,34 @@ def test_read_dataframe(mock_read_parquet, memory_repository):
     # calls `BaseRepository._read_dataframe` despite class using `MemoryRepository`
     super(MemoryRepository, repository)._read_dataframe(path)
 
-    mock_read_parquet.assert_called_once_with(f"{path}/data.parquet", engine="pyarrow")
+    mock_read_parquet.assert_called_once_with(
+        f"{path}/data.parquet",
+        engine="pyarrow",
+        storage_options={},
+    )
+
+
+def test_read_dataframe_value_error(memory_repository):
+    repository = memory_repository
+    path = "./local/root"
+
+    with pytest.raises(ValueError) as e:
+        # calls `BaseRepository._read_dataframe` despite class using `MemoryRepository`
+        super(MemoryRepository, repository)._read_dataframe(path, df_type="INVALID")
+
+    assert "`df_type` must be one of " in str(e)
+
+
+def test_read_dataframe_import_error(memory_repository):
+    repository = memory_repository
+    path = "./local/root"
+
+    with patch.dict(sys.modules, {"dask": None}):
+        with pytest.raises(RubiconException) as e:
+            # calls `BaseRepository._read_dataframe` despite class using `MemoryRepository`
+            super(MemoryRepository, repository)._read_dataframe(path, df_type="dask")
+
+    assert "`rubicon_ml` requires `dask` to be installed" in str(e)
 
 
 def test_get_dataframe_with_project_parent_root(memory_repository):
@@ -464,6 +531,36 @@ def test_create_dask_dataframe(memory_repository):
     assert dataframe.id == dataframe_json["id"]
 
 
+def test_create_polars_dataframe(memory_repository):
+    repository = memory_repository
+    project = _create_project(repository)
+    dataframe = _create_polars_dataframe(repository, project=project)
+
+    dataframe_root = f"{repository.root_dir}/{slugify(project.name)}/dataframes/{dataframe.id}"
+    dataframe_metadata_path = f"{dataframe_root}/metadata.json"
+    dataframe_data_path = f"{dataframe_root}/data"
+
+    open_file = repository.filesystem.open(dataframe_metadata_path)
+    with open_file as f:
+        dataframe_json = json.load(f)
+
+    assert repository.filesystem.exists(dataframe_data_path)
+    assert dataframe.id == dataframe_json["id"]
+
+
+def test_get_polars_dataframe(memory_repository):
+    repository = memory_repository
+    project = _create_project(repository)
+    written_dataframe = _create_polars_dataframe(repository, project=project)
+    dataframe = repository.get_dataframe_metadata(project.name, written_dataframe.id)
+
+    data = repository.get_dataframe_data(project.name, written_dataframe.id, df_type="polars")
+    assert not data.is_empty()
+
+    assert dataframe.id == written_dataframe.id
+    assert dataframe.parent_id == written_dataframe.parent_id
+
+
 def test_get_pandas_dataframe(memory_repository):
     repository = memory_repository
     project = _create_project(repository)
@@ -496,7 +593,7 @@ def test_get_dask_dataframe(memory_repository):
     written_dataframe = _create_dask_dataframe(repository, project=project)
     dataframe = repository.get_dataframe_metadata(project.name, written_dataframe.id)
 
-    data = repository.get_dataframe_data(project.name, written_dataframe.id)
+    data = repository.get_dataframe_data(project.name, written_dataframe.id, df_type="dask")
     assert not data.compute().empty
 
     assert dataframe.id == written_dataframe.id
@@ -834,7 +931,9 @@ def test_get_dataframe_tags_with_project_parent_root(memory_repository):
     project = _create_project(repository)
     dataframe = _create_pandas_dataframe(repository, project=project)
     dataframe_tags_root = repository._get_tag_metadata_root(
-        project.name, entity_identifier=dataframe.id, entity_type=dataframe.__class__.__name__
+        project.name,
+        entity_identifier=dataframe.id,
+        entity_type=dataframe.__class__.__name__,
     )
 
     assert (
@@ -956,3 +1055,79 @@ def test_get_tags_with_no_results(memory_repository):
     )
 
     assert tags == []
+
+
+def test_add_comments(memory_repository):
+    repository = memory_repository
+    experiment = _create_experiment(repository)
+    repository.add_comments(
+        experiment.project_name,
+        ["this is a comment"],
+        experiment_id=experiment.id,
+        entity_type=experiment.__class__.__name__,
+    )
+
+    comments_glob = f"{repository.root_dir}/{slugify(experiment.project_name)}/experiments/{experiment.id}/comments_*.json"
+    comments_files = repository.filesystem.glob(comments_glob)
+
+    assert len(comments_files) == 1
+
+    open_file = repository.filesystem.open(comments_files[0])
+    with open_file as f:
+        comments_json = json.load(f)
+
+    assert ["this is a comment"] == comments_json["added_comments"]
+
+
+def test_remove_comments(memory_repository):
+    repository = memory_repository
+    experiment = _create_experiment(repository, comments=["this is a comment"])
+    repository.remove_comments(
+        experiment.project_name,
+        ["this is a comment"],
+        experiment_id=experiment.id,
+        entity_type=experiment.__class__.__name__,
+    )
+
+    comments_glob = f"{repository.root_dir}/{slugify(experiment.project_name)}/experiments/{experiment.id}/comments_*.json"
+    comments_files = repository.filesystem.glob(comments_glob)
+
+    assert len(comments_files) == 1
+
+    open_file = repository.filesystem.open(comments_files[0])
+    with open_file as f:
+        comments_json = json.load(f)
+
+    assert ["this is a comment"] == comments_json["removed_comments"]
+
+
+def test_get_comments(memory_repository):
+    repository = memory_repository
+    experiment = _create_experiment(repository)
+    repository.add_comments(
+        experiment.project_name,
+        ["this is a comment"],
+        experiment_id=experiment.id,
+        entity_type=experiment.__class__.__name__,
+    )
+
+    comments = repository.get_comments(
+        experiment.project_name,
+        experiment_id=experiment.id,
+        entity_type=experiment.__class__.__name__,
+    )
+
+    assert {"added_comments": ["this is a comment"]} in comments
+
+
+def test_get_comments_with_no_results(memory_repository):
+    repository = memory_repository
+    experiment = _create_experiment(repository)
+
+    comments = repository.get_comments(
+        experiment.project_name,
+        experiment_id=experiment.id,
+        entity_type=experiment.__class__.__name__,
+    )
+
+    assert comments == []
